@@ -330,7 +330,8 @@
             isUsingDemo: true,
             subTab: 'daily', // Sub-tabs: daily, calendar, yearly, budget
             isLoading: false,
-            enteredPin: ""
+            enteredPin: "",
+            preloadedDashboard: null
         };
 
         const formatIDR = (val) => new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', minimumFractionDigits: 0 }).format(val);
@@ -339,16 +340,14 @@
         // MEMBUAT LOGO TRANSPARAN BEBAS DARI BACKGROUND PUTIH KOTAK
         function renderLogo(sizeClass = "w-10 h-10", iconSize = "w-5 h-5") {
             const logoUrl = state.data.settings.APP_LOGO || "";
-            const isLargeLogo = sizeClass.includes("w-16") || sizeClass.includes("h-16");
+            const isLockscreenLogo = sizeClass.includes("w-24") || sizeClass.includes("h-24") || sizeClass.includes("w-20") || sizeClass.includes("h-20");
 
             if (logoUrl && logoUrl.trim() !== "" && logoUrl.startsWith("http")) {
-                // Penting: wrapper dan image dibuat benar-benar transparent.
-                // Kalau masih terlihat putih, berarti file gambar dari URL memang sudah punya background putih di dalam file-nya.
                 return `
                     <div class="relative ${sizeClass} mx-auto flex items-center justify-center logo-transparent-wrap">
                         <img 
                             src="${logoUrl}" 
-                            class="logo-transparent-img ${isLargeLogo ? 'scale-[1.45]' : 'scale-[1.15]'}" 
+                            class="logo-transparent-img ${isLockscreenLogo ? 'scale-[1.35]' : 'scale-[1.08]'}" 
                             alt="Logo iMersWallet" 
                             onerror="handleLogoError(this, '${sizeClass}', '${iconSize}')"
                         >
@@ -520,13 +519,80 @@
             }
         }
 
+
+        // --- PRELOAD BRANDING SEBELUM PIN ---
+        // Logo dari Google Sheets langsung tampil di lockscreen tanpa harus input PIN dulu.
+        function applyBrandingSettings(settings = {}) {
+            if (!settings) return;
+
+            if (settings.APP_LOGO && String(settings.APP_LOGO).trim() !== "") {
+                state.data.settings.APP_LOGO = String(settings.APP_LOGO).trim();
+                try {
+                    localStorage.setItem('imerswallet_app_logo', state.data.settings.APP_LOGO);
+                } catch (e) {}
+            }
+
+            if (settings.BOT_NUMBER && String(settings.BOT_NUMBER).trim() !== "") {
+                CONFIG.BOT_NUMBER = String(settings.BOT_NUMBER).trim();
+                try {
+                    localStorage.setItem('imerswallet_bot_number', CONFIG.BOT_NUMBER);
+                } catch (e) {}
+
+                const desktopWaBtn = document.getElementById('desktop-wa-btn');
+                if (desktopWaBtn) desktopWaBtn.href = `https://wa.me/${CONFIG.BOT_NUMBER}`;
+            }
+
+            if (settings.ACTIVE_BOT_CHANNEL && String(settings.ACTIVE_BOT_CHANNEL).trim() !== "") {
+                try {
+                    localStorage.setItem('imerswallet_active_bot_channel', String(settings.ACTIVE_BOT_CHANNEL).trim());
+                } catch (e) {}
+            }
+
+            updateLogosInUI();
+        }
+
+        function hydrateCachedBranding() {
+            try {
+                const cachedLogo = localStorage.getItem('imerswallet_app_logo');
+                const cachedBotNumber = localStorage.getItem('imerswallet_bot_number');
+
+                if (cachedLogo) state.data.settings.APP_LOGO = cachedLogo;
+                if (cachedBotNumber) CONFIG.BOT_NUMBER = cachedBotNumber;
+            } catch (e) {}
+
+            updateLogosInUI();
+        }
+
+        async function preloadBrandingBeforePin() {
+            hydrateCachedBranding();
+
+            try {
+                const response = await fetchWithTimeout(`${CONFIG.API_URL}?action=getDashboard&branding=1`, { timeout: 12000 });
+                if (!response.ok) throw new Error("Branding fetch gagal.");
+
+                const result = await response.json();
+                if (result && result.status === 'success') {
+                    state.preloadedDashboard = result;
+                    applyBrandingSettings(result.settings || {});
+                }
+            } catch (err) {
+                console.warn("Branding lockscreen belum bisa dimuat dari cloud, memakai cache/default.", err);
+            }
+        }
+
         // --- AMBIL DATA REAL-TIME DARI GOOGLE APPS SCRIPT ---
         async function fetchDashboardData() {
             state.isLoading = true;
             try {
-                const response = await fetchWithTimeout(`${CONFIG.API_URL}?action=getDashboard`, { timeout: 15000 });
-                if (!response.ok) throw new Error("Koneksi gagal.");
-                const result = await response.json();
+                let result = state.preloadedDashboard;
+
+                if (!result) {
+                    const response = await fetchWithTimeout(`${CONFIG.API_URL}?action=getDashboard`, { timeout: 15000 });
+                    if (!response.ok) throw new Error("Koneksi gagal.");
+                    result = await response.json();
+                } else {
+                    state.preloadedDashboard = null;
+                }
                 
                 if (result && result.status === 'success') {
                     state.data = result;
@@ -1571,19 +1637,26 @@
         }
 
         // --- PENYEDIAAN UTAMA SEWAKTU SKRIN DIMUAT ---
-        window.onload = () => {
+        window.onload = async () => {
             const desktopWaBtn = document.getElementById('desktop-wa-btn');
             if (desktopWaBtn) desktopWaBtn.href = `https://wa.me/${CONFIG.BOT_NUMBER}`;
-            
+
+            // Muat logo dari cache/localStorage secepat mungkin supaya lockscreen tidak tampil logo dummy.
+            hydrateCachedBranding();
+
+            // Refresh logo dari Google Sheets bahkan sebelum PIN dimasukkan.
+            const brandingPromise = preloadBrandingBeforePin();
+
             // Periksa sekiranya PIN keselamatan telah disahkan sebelum ini
             if (sessionStorage.getItem('authenticated_pin') === 'true') {
                 document.getElementById('pin-lockscreen').classList.add('hidden');
+                await brandingPromise;
                 fetchDashboardData();
             } else {
                 document.getElementById('global-loader').classList.add('hidden');
-                updateLogosInUI();
-                // Fokus pada input secara automatik
-                setTimeout(focusPinInput, 500);
+                await brandingPromise;
+                // Fokus pada input secara otomatis setelah logo cloud selesai dicoba.
+                setTimeout(focusPinInput, 300);
             }
         };
     </script>
